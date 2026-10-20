@@ -1,0 +1,21 @@
+# Quantum ML Project dependencies
+#
+# IMPORTANT FOR INTEL Macs (x86_64):
+# PyTorch stopped publishing newer macOS x86_64 wheels.
+# Use Python 3.12 and the pinned torch 2.2.2 wheel.
+#
+# Check with:
+#   python --version
+#   python -c "import platform; print(platform.machine())"
+
+pennylane==0.45.1
+PyYAML>=6.0,<7.0
+matplotlib>=3.10,<4.0
+
+# PyTorch by platform
+torch==2.2.2; sys_platform == "darwin" and platform_machine == "x86_64"
+torch>=2.10,<2.14; sys_platform == "darwin" and platform_machine == "arm64"
+torch>=2.10,<2.14; sys_platform == "linux" or sys_platform == "win32"
+
+# PyTorch 2.2.x on Intel macOS is safest with NumPy 1.x
+numpy<2.0; sys_platform == "darwin" and platform_machine == "x86_64"

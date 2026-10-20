@@ -1,0 +1,27 @@
+# Quantum ML Project
+# ------------------------------------------------------------
+# This file contains ONLY quantum-circuit-related parameters.
+# Runtime/training values such as episodes, learning rate, and
+# compute device are provided by driver.py through CLI arguments.
+
+quantum_circuit:
+  # Number of qubits used by the Variational Quantum Circuit.
+  n_qubits: 4
+
+  # Number of repeated trainable variational layers.
+  n_layers: 2
+
+  # Classical-data encoding gate: RX | RY | RZ
+  encoding_gate: RY
+
+  # Trainable single-qubit rotation gates used in every layer.
+  trainable_rotations: [RX, RY, RZ]
+
+  # Entanglement topology: chain | ring | none
+  entanglement: ring
+
+  # Two-qubit gate used for entanglement: CNOT | CZ
+  entangling_gate: CNOT
+
+  # Observable measured on every qubit: X | Y | Z
+  measurement_pauli: Z
