@@ -18,10 +18,8 @@ The driver contains:
 - command-line arguments,
 - FrozenLake environment creation,
 - training loop,
-- target-network synchronization,
 - evaluation,
-- optional rendering,
-- CSV/model saving.
+- Results/model saving.
 
 FrozenLake state encoding
 -------------------------
@@ -32,197 +30,20 @@ Example:
     state 11 -> 1011 -> [pi, 0, pi, pi]
 """
 
-import argparse
 import csv
 import math
-from pathlib import Path
 import random
+from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
 import torch
-import yaml
 
 from VQC_framework import VQC
-from dqn_vqc import (
-    ReplayBuffer,
-    VQCDQN,
-    optimize_dqn,
-    select_action,
-)
+from dqn_vqc import ReplayBuffer, VQCDQN, optimize_dqn, select_action
 
 from plot_frozenlake_results import plot_results
-
-
-DEFAULT_CONFIG = "config_quantum_circuit.yaml"
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="VQC-DQN on Gymnasium FrozenLake"
-    )
-
-    # Main DQN parameters.
-    parser.add_argument("--episodes", type=int, default=500)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--batch-size", type=int, default=16)
-
-    parser.add_argument("--replay-size", type=int, default=1000)
-    parser.add_argument("--min-replay-size", type=int, default=32)
-    parser.add_argument("--target-update", type=int, default=20)
-
-    parser.add_argument("--epsilon-start", type=float, default=1.0)
-    parser.add_argument("--epsilon-end", type=float, default=0.05)
-    parser.add_argument("--epsilon-decay", type=float, default=150.0)
-
-    parser.add_argument("--max-steps", type=int, default=100)
-    parser.add_argument("--eval-episodes", type=int, default=20)
-
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        choices=["auto", "cpu", "cuda", "mps"],
-    )
-
-    # Deterministic FrozenLake is easier for this first QRL example.
-    # Add --slippery to use the stochastic environment.
-    parser.add_argument(
-        "--slippery",
-        action="store_true",
-        help="Use stochastic/slippery FrozenLake.",
-    )
-
-    # Rendering is used during final greedy evaluation, not during training.
-    parser.add_argument(
-        "--render",
-        action="store_true",
-        help="Render evaluation episodes in a window.",
-    )
-
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=DEFAULT_CONFIG,
-    )
-
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-    )
-
-    parser.add_argument(
-        "--results-output",
-        type=str,
-        default="results/frozenlake_vqc_dqn.csv",
-    )
-
-    parser.add_argument(
-        "--model-output",
-        type=str,
-        default="results/frozenlake_vqc_dqn.pt",
-    )
-
-    parser.add_argument(
-        "--plots-dir",
-        type=str,
-        default="results/plots",
-        help="Directory used to save training-result figures.",
-    )
-
-    parser.add_argument(
-        "--plot-window",
-        type=int,
-        default=100,
-        help="Moving-average window for reward/success plots.",
-    )
-
-    parser.add_argument(
-        "--circuit-output",
-        type=str,
-        default="results/frozenlake_vqc_circuit.png",
-        help="Path used to save the VQC circuit visualization.",
-    )
-
-    return parser.parse_args()
-
-
-def resolve_training_device(requested):
-    """Choose a stable device for default.qubit based hybrid training."""
-    requested = requested.lower()
-
-    if requested == "cpu":
-        return "cpu"
-
-    if requested == "cuda":
-        if torch.cuda.is_available():
-            return "cuda"
-
-        print(
-            "Warning: CUDA requested but unavailable. "
-            "Falling back to CPU."
-        )
-        return "cpu"
-
-    if requested == "mps":
-        print(
-            "Warning: Apple MPS requested. PennyLane default.qubit "
-            "is CPU based, so this QRL example uses CPU for stable "
-            "forward/backward execution."
-        )
-        return "cpu"
-
-    if requested == "auto":
-        if torch.cuda.is_available():
-            return "cuda"
-
-        if (
-            hasattr(torch.backends, "mps")
-            and torch.backends.mps.is_available()
-        ):
-            print(
-                "Info: MPS is available, but CPU is selected because "
-                "the VQC uses PennyLane default.qubit."
-            )
-
-        return "cpu"
-
-    raise ValueError(
-        "device must be auto, cpu, cuda, or mps"
-    )
-
-
-def load_quantum_circuit_config(path):
-    """Load only the quantum-circuit section from YAML."""
-    with open(
-        path,
-        "r",
-        encoding="utf-8",
-    ) as file:
-        config = yaml.safe_load(file)
-
-    if (
-        not isinstance(config, dict)
-        or "quantum_circuit" not in config
-    ):
-        raise KeyError(
-            "The configuration file must contain "
-            "'quantum_circuit:'."
-        )
-
-    return config["quantum_circuit"]
-
-
-def set_seed(seed):
-    """Set basic random seeds."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+from util import parse_args, resolve_training_device, load_quantum_circuit_config, set_seed
 
 
 def epsilon_by_episode(args, episode):
@@ -243,37 +64,18 @@ def create_environment(slippery, render=False):
     """Create FrozenLake-v1."""
     render_mode = "human" if render else None
 
-    return gym.make(
-        "FrozenLake-v1",
-        map_name="4x4",
-        is_slippery=slippery,
-        render_mode=render_mode,
-    )
+    return gym.make("FrozenLake-v1", map_name="4x4", is_slippery=slippery, render_mode=render_mode)
 
 
 def save_training_history(history, output_path):
     """Write episode-level training statistics to CSV."""
     output_path = Path(output_path)
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with output_path.open(
-        "w",
-        newline="",
-        encoding="utf-8",
-    ) as file:
+    with output_path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(
             file,
-            fieldnames=[
-                "episode",
-                "reward",
-                "steps",
-                "loss",
-                "epsilon",
-                "success",
-            ],
+            fieldnames=["episode", "reward", "steps", "loss", "epsilon", "success"],
         )
 
         writer.writeheader()
@@ -285,18 +87,10 @@ def save_training_history(history, output_path):
     )
 
 
-def save_model(
-    policy_net,
-    args,
-    circuit_config,
-    output_path,
-):
+def save_model(policy_net, args, circuit_config, output_path):
     """Save the trained policy-network checkpoint."""
     output_path = Path(output_path)
-    output_path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     torch.save(
         {
@@ -316,16 +110,9 @@ def save_model(
     )
 
 
-def evaluate_policy(
-    policy_net,
-    args,
-    seed,
-):
+def evaluate_policy(policy_net, args, seed):
     """Run greedy evaluation; optionally render it."""
-    env = create_environment(
-        slippery=args.slippery,
-        render=args.render,
-    )
+    env = create_environment(slippery=args.slippery, render=args.render)
 
     successes = 0
     rewards = []
@@ -333,12 +120,8 @@ def evaluate_policy(
     print("\nEvaluation")
     print("----------")
 
-    for episode in range(
-        args.eval_episodes
-    ):
-        state, _ = env.reset(
-            seed=seed + 10000 + episode
-        )
+    for episode in range(args.eval_episodes):
+        state, _ = env.reset(seed=seed + 10000 + episode)
 
         episode_reward = 0.0
 
@@ -352,17 +135,9 @@ def evaluate_policy(
                     )
                 )
 
-                action = int(
-                    q_values.argmax().item()
-                )
+                action = int(q_values.argmax().item())
 
-            (
-                next_state,
-                reward,
-                terminated,
-                truncated,
-                _,
-            ) = env.step(action)
+            next_state, reward, terminated, truncated, _ = env.step(action)
 
             episode_reward += reward
             state = next_state
@@ -387,15 +162,9 @@ def evaluate_policy(
 
     env.close()
 
-    success_rate = (
-        100.0
-        * successes
-        / args.eval_episodes
-    )
+    success_rate = (100.0 * successes / args.eval_episodes)
 
-    mean_reward = float(
-        np.mean(rewards)
-    )
+    mean_reward = float(np.mean(rewards))
 
     print(
         f"\nMean evaluation reward : "
@@ -415,20 +184,12 @@ def save_circuit_figure(policy_net, output_path, example_state=11):
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    state = torch.tensor(
-        example_state,
-        dtype=torch.long,
-        device=policy_net.q_head.weight.device,
-    )
+    state = torch.tensor(example_state, dtype=torch.long, device=policy_net.q_head.weight.device)
 
     with torch.no_grad():
         quantum_input = policy_net.state_to_quantum_angles(state)
 
-    policy_net.vqc.visualize(
-        quantum_input,
-        save_path=str(output_path),
-        show=False,
-    )
+    policy_net.vqc.visualize(quantum_input, save_path=str(output_path), show=False)
 
     print(f"VQC circuit figure saved to: {output_path}")
 
@@ -437,31 +198,18 @@ def main():
     args = parse_args()
     set_seed(args.seed)
 
-    training_device = resolve_training_device(
-        args.device
-    )
+    training_device = resolve_training_device(args.device)
 
-    circuit_config = (
-        load_quantum_circuit_config(
-            args.config
-        )
-    )
+    circuit_config = (load_quantum_circuit_config(args.config))
 
     # Training environment never renders.
-    env = create_environment(
-        slippery=args.slippery,
-        render=False,
-    )
+    env = create_environment(slippery=args.slippery, render=False)
 
     n_states = env.observation_space.n
     n_actions = env.action_space.n
 
-    print(
-        "\nQuantum ML Project - FrozenLake VQC-DQN"
-    )
-    print(
-        "======================================="
-    )
+    print("\nQuantum ML Project - FrozenLake VQC-DQN")
+    print("=======================================")
     print(f"Episodes          : {args.episodes}")
     print(f"Learning rate     : {args.lr}")
     print(f"Gamma             : {args.gamma}")
@@ -476,34 +224,18 @@ def main():
     print(f"Actions           : {n_actions}")
 
     # Online/policy VQC.
-    policy_vqc = VQC(
-        circuit_config,
-        device=training_device,
-    )
+    policy_vqc = VQC(circuit_config, device=training_device)
 
     # Target network must have an independent VQC instance.
-    target_vqc = VQC(
-        circuit_config,
-        device=training_device,
-    )
+    target_vqc = VQC(circuit_config, device=training_device)
 
     device = policy_vqc.device
 
-    policy_net = VQCDQN(
-        policy_vqc,
-        n_states=n_states,
-        n_actions=n_actions,
-    ).to(device)
+    policy_net = VQCDQN(policy_vqc, n_states=n_states, n_actions=n_actions).to(device)
 
-    target_net = VQCDQN(
-        target_vqc,
-        n_states=n_states,
-        n_actions=n_actions,
-    ).to(device)
+    target_net = VQCDQN(target_vqc, n_states=n_states, n_actions=n_actions).to(device)
 
-    target_net.load_state_dict(
-        policy_net.state_dict()
-    )
+    target_net.load_state_dict(policy_net.state_dict())
 
     target_net.eval()
 
@@ -513,14 +245,9 @@ def main():
     print("---")
     print(policy_net)
 
-    optimizer = torch.optim.Adam(
-        policy_net.parameters(),
-        lr=args.lr,
-    )
+    optimizer = torch.optim.Adam(policy_net.parameters(), lr=args.lr)
 
-    replay_buffer = ReplayBuffer(
-        args.replay_size
-    )
+    replay_buffer = ReplayBuffer(args.replay_size)
 
     rng = random.Random(args.seed)
 
@@ -529,102 +256,45 @@ def main():
     print("\nTraining")
     print("--------")
 
-    for episode in range(
-        1,
-        args.episodes + 1,
-    ):
-        state, _ = env.reset(
-            seed=args.seed + episode
-        )
+    for episode in range(1, args.episodes + 1):
+        state, _ = env.reset(seed=args.seed + episode)
 
-        epsilon = epsilon_by_episode(
-            args,
-            episode - 1,
-        )
+        epsilon = epsilon_by_episode(args, episode - 1)
 
         total_reward = 0.0
         episode_losses = []
         steps_taken = 0
 
-        for step in range(
-            1,
-            args.max_steps + 1,
-        ):
-            action = select_action(
-                policy_net,
-                state,
-                epsilon,
-                n_actions,
-                rng,
-            )
+        for step in range(1, args.max_steps + 1):
+            action = select_action(policy_net, state, epsilon, n_actions, rng)
 
-            (
-                next_state,
-                reward,
-                terminated,
-                truncated,
-                _,
-            ) = env.step(action)
+            next_state, reward, terminated, truncated, _= env.step(action)
 
-            done = (
-                terminated
-                or truncated
-            )
+            done = terminated or truncated
 
-            replay_buffer.push(
-                state,
-                action,
-                reward,
-                next_state,
-                done,
-            )
+            replay_buffer.push(state, action, reward, next_state, done)
 
             state = next_state
             total_reward += reward
             steps_taken = step
 
-            # Delay learning until the replay buffer has enough diversity.
-            if (
-                len(replay_buffer)
-                >= args.min_replay_size
-            ):
-                loss = optimize_dqn(
-                    policy_net,
-                    target_net,
-                    replay_buffer,
-                    optimizer,
-                    args.batch_size,
-                    args.gamma,
-                    device,
-                )
+            # Delay learning until the replay buffer has enough experience.
+            if (len(replay_buffer) >= args.min_replay_size):
+                loss = optimize_dqn(policy_net, target_net, replay_buffer, optimizer, args.batch_size, args.gamma, device)
 
                 if loss is not None:
-                    episode_losses.append(
-                        loss
-                    )
+                    episode_losses.append(loss)
 
             if done:
                 break
 
         # Periodically synchronize the target network.
-        if (
-            episode
-            % args.target_update
-            == 0
-        ):
-            target_net.load_state_dict(
-                policy_net.state_dict()
-            )
+        if (episode % args.target_update == 0):
+            target_net.load_state_dict(policy_net.state_dict())
 
-        mean_loss = (
-            float(np.mean(episode_losses))
-            if episode_losses
-            else 0.0
-        )
+        mean_loss = (float(np.mean(episode_losses)) if episode_losses else 0.0)
 
-        success = int(
-            total_reward > 0.0
-        )
+        success = int(total_reward > 0.0)
 
         history.append(
             {
@@ -637,30 +307,12 @@ def main():
             }
         )
 
-        if (
-            episode == 1
-            or episode % 25 == 0
-            or episode == args.episodes
-        ):
+        if (episode == 1 or episode % 25 == 0 or episode == args.episodes):
             recent = history[-100:]
 
-            recent_success = (
-                100.0
-                * sum(
-                    item["success"]
-                    for item in recent
-                )
-                / len(recent)
-            )
+            recent_success = (100.0 * sum(item["success"] for item in recent)/ len(recent))
 
-            recent_reward = float(
-                np.mean(
-                    [
-                        item["reward"]
-                        for item in recent
-                    ]
-                )
-            )
+            recent_reward = float(np.mean([item["reward"] for item in recent]))
 
             print(
                 f"Episode "
@@ -675,39 +327,19 @@ def main():
 
     env.close()
 
-    save_training_history(
-        history,
-        args.results_output,
-    )
+    save_training_history(history, args.results_output)
 
-    save_model(
-        policy_net,
-        args,
-        circuit_config,
-        args.model_output,
-    )
+    save_model(policy_net, args, circuit_config, args.model_output)
 
     print("\nGenerating training plots")
     print("-------------------------")
-    plot_results(
-        input_csv=args.results_output,
-        output_dir=args.plots_dir,
-        window=args.plot_window,
-    )
+    plot_results(input_csv=args.results_output, output_dir=args.plots_dir, window=args.plot_window)
 
     print("\nGenerating VQC circuit figure")
     print("-----------------------------")
-    save_circuit_figure(
-        policy_net,
-        args.circuit_output,
-        example_state=11,
-    )
+    save_circuit_figure(policy_net, args.circuit_output, example_state=11)
 
-    evaluate_policy(
-        policy_net,
-        args,
-        args.seed,
-    )
+    evaluate_policy(policy_net, args, args.seed)
 
 
 if __name__ == "__main__":

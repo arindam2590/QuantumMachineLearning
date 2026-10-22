@@ -1,4 +1,4 @@
-"""Reusable Variational Quantum Circuit class used by Quantum ML Project."""
+"""Variational Quantum Circuit class used by Quantum ML Project."""
 
 from __future__ import annotations
 
@@ -10,18 +10,13 @@ import pennylane as qml
 import torch
 from torch import nn
 
-from .circuit import (
-    apply_entanglement,
-    apply_variational_layer,
-    encode_inputs,
-    make_observable,
-    validate_circuit_config,
-)
+from .circuit import apply_entanglement, apply_variational_layer, encode_inputs, make_observable, validate_circuit_config
+
 from .visualization import draw_circuit, visualize_circuit
 
 
 class VQC(nn.Module):
-    """Reusable Variational Quantum Circuit.
+    """Variational Quantum Circuit.
 
     Parameters
     ----------
@@ -78,15 +73,9 @@ class VQC(nn.Module):
                 "trainable_rotations", ["RX", "RY", "RZ"]
             )
         )
-        self.entanglement = str(
-            self.config.get("entanglement", "ring")
-        ).lower()
-        self.entangling_gate = str(
-            self.config.get("entangling_gate", "CNOT")
-        ).upper()
-        self.measurement_pauli = str(
-            self.config.get("measurement_pauli", "Z")
-        ).upper()
+        self.entanglement = str(self.config.get("entanglement", "ring")).lower()
+        self.entangling_gate = str(self.config.get("entangling_gate", "CNOT")).upper()
+        self.measurement_pauli = str(self.config.get("measurement_pauli", "Z")).upper()
 
         validate_circuit_config(
             self.n_qubits,
@@ -101,44 +90,23 @@ class VQC(nn.Module):
 
         torch.manual_seed(self._RANDOM_SEED)
 
-        weight_shape = (
-            self.n_layers,
-            self.n_qubits,
-            len(self.trainable_rotations),
-        )
-        initial_weights = self._WEIGHT_INIT_SCALE * torch.randn(
-            weight_shape,
-            dtype=torch.float32,
-        )
+        weight_shape = (self.n_layers, self.n_qubits, len(self.trainable_rotations))
+        initial_weights = self._WEIGHT_INIT_SCALE * torch.randn(weight_shape, dtype=torch.float32)
         self.weights = nn.Parameter(initial_weights.to(self.device))
 
         # The only simulator used by this minimal framework.
-        self.quantum_device = qml.device(
-            "default.qubit",
-            wires=self.n_qubits,
-        )
+        self.quantum_device = qml.device("default.qubit", wires=self.n_qubits)
 
-        @qml.qnode(
-            self.quantum_device,
-            interface="torch",
-            diff_method=self._DIFF_METHOD,
-        )
+        @qml.qnode(self.quantum_device, interface="torch", diff_method=self._DIFF_METHOD)
+        
         def circuit(inputs: torch.Tensor, weights: torch.Tensor):
             # 1. Classical-to-quantum state encoding.
             encode_inputs(inputs, self.n_qubits, self.encoding_gate)
 
             # 2. Repeated trainable variational layers.
             for layer in range(self.n_layers):
-                apply_variational_layer(
-                    weights[layer],
-                    self.n_qubits,
-                    self.trainable_rotations,
-                )
-                apply_entanglement(
-                    self.n_qubits,
-                    self.entanglement,
-                    self.entangling_gate,
-                )
+                apply_variational_layer(weights[layer], self.n_qubits, self.trainable_rotations)
+                apply_entanglement(self.n_qubits, self.entanglement, self.entangling_gate)
 
             # 3. Quantum measurement.
             return [
@@ -183,10 +151,7 @@ class VQC(nn.Module):
 
         raise ValueError("device must be one of: auto, cpu, cuda, mps")
 
-    def forward(
-        self,
-        inputs: Union[torch.Tensor, Sequence[float]],
-    ) -> torch.Tensor:
+    def forward(self, inputs: Union[torch.Tensor, Sequence[float]]) -> torch.Tensor:
         """Execute the circuit for one observation or a batch.
 
         Accepted shapes
@@ -197,20 +162,14 @@ class VQC(nn.Module):
         ``[batch_size, n_qubits]``
             Batch of observations.
         """
-        x = torch.as_tensor(
-            inputs,
-            dtype=torch.float32,
-            device=self.device,
-        )
+        x = torch.as_tensor(inputs, dtype=torch.float32, device=self.device)
 
         if x.ndim == 1:
             return self._forward_single(x)
         if x.ndim == 2:
             return torch.stack([self._forward_single(row) for row in x])
 
-        raise ValueError(
-            "inputs must have shape [n_qubits] or [batch, n_qubits]"
-        )
+        raise ValueError("inputs must have shape [n_qubits] or [batch, n_qubits]")
 
     def _forward_single(self, x: torch.Tensor) -> torch.Tensor:
 
@@ -221,37 +180,21 @@ class VQC(nn.Module):
             )
 
         # default.qubit executes on CPU
-        x_cpu = x.reshape(self.n_qubits).to(
-            device="cpu",
-            dtype=torch.float32
-        )
+        x_cpu = x.reshape(self.n_qubits).to(device="cpu", dtype=torch.float32)
 
-        weights_cpu = self.weights.to(
-            device="cpu",
-            dtype=torch.float32
-        )
+        weights_cpu = self.weights.to(device="cpu", dtype=torch.float32)
 
-        result = self.qnode(
-            x_cpu,
-            weights_cpu
-        )
+        result = self.qnode(x_cpu, weights_cpu)
 
         if isinstance(result, (tuple, list)):
             result = torch.stack(list(result))
 
         # Important for Apple MPS
-        return result.to(
-            device=self.device,
-            dtype=self.weights.dtype
-        )
+        return result.to(device=self.device, dtype=self.weights.dtype)
 
     def parameter_count(self) -> int:
         """Return the number of trainable quantum-circuit parameters."""
-        return sum(
-            parameter.numel()
-            for parameter in self.parameters()
-            if parameter.requires_grad
-        )
+        return sum(parameter.numel() for parameter in self.parameters() if parameter.requires_grad)
 
     def summary(self) -> str:
         """Return a concise description of the generated VQC."""
@@ -270,17 +213,9 @@ class VQC(nn.Module):
                 f"Trainable parameters : {self.parameter_count()}"
             )
 
-    def draw(
-        self,
-        inputs: Optional[Sequence[float]] = None,
-    ) -> str:
+    def draw(self, inputs: Optional[Sequence[float]] = None) -> str:
         """Return a text drawing of the actual generated quantum circuit."""
-        return draw_circuit(
-            self.qnode,
-            self.weights,
-            self.n_qubits,
-            inputs,
-        )
+        return draw_circuit(self.qnode, self.weights, self.n_qubits, inputs)
 
     def visualize(
         self,
@@ -289,11 +224,4 @@ class VQC(nn.Module):
         show: bool = True,
     ):
         """Create a Matplotlib visualization of the actual generated VQC."""
-        return visualize_circuit(
-            self.qnode,
-            self.weights,
-            self.n_qubits,
-            inputs,
-            save_path=save_path,
-            show=show,
-        )
+        return visualize_circuit(self.qnode, self.weights, self.n_qubits, inputs, save_path=save_path, show=show)

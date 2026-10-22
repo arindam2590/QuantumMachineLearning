@@ -1,4 +1,4 @@
-"""Circuit drawing and visualization helpers for :mod:`VQC_framework`."""
+"""Circuit drawing and visualization code for :mod:`VQC_framework`."""
 
 from __future__ import annotations
 
@@ -9,10 +9,7 @@ import pennylane as qml
 import torch
 
 
-def prepare_drawing_input(
-    inputs: Optional[Sequence[float]],
-    n_qubits: int,
-) -> torch.Tensor:
+def prepare_drawing_input(inputs: Optional[Sequence[float]], n_qubits: int) -> torch.Tensor:
     """Prepare a valid CPU tensor for circuit visualization."""
     if inputs is None:
         return torch.zeros(n_qubits, dtype=torch.float32)
@@ -30,27 +27,14 @@ def prepare_drawing_input(
 def draw_circuit(qnode, weights, n_qubits: int, inputs=None) -> str:
     """Return a text drawing of the generated PennyLane circuit."""
     x = prepare_drawing_input(inputs, n_qubits)
-    return qml.draw(qnode)(
-        x,
-        weights.detach().to("cpu"),
-    )
+    return qml.draw(qnode)(x, weights.detach().to("cpu"))
 
 
-def visualize_circuit(
-    qnode,
-    weights,
-    n_qubits: int,
-    inputs=None,
-    save_path: Optional[str] = None,
-    show: bool = True,
-):
+def visualize_circuit(qnode, weights, n_qubits: int, inputs=None, save_path: Optional[str] = None, show: bool = True):
     """Create and optionally save a Matplotlib visualization of the VQC."""
     x = prepare_drawing_input(inputs, n_qubits)
 
-    fig, ax = qml.draw_mpl(qnode)(
-        x,
-        weights.detach().to("cpu"),
-    )
+    fig, ax = qml.draw_mpl(qnode)(x, weights.detach().to("cpu"))
     fig.suptitle("Variational Quantum Circuit")
     fig.tight_layout()
 

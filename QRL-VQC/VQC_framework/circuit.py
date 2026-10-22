@@ -1,7 +1,7 @@
 """Quantum-circuit construction helpers for :mod:`VQC_framework`.
 
-This module contains only the reusable circuit-building operations used by
-:class:`VQC`.  Application logic remains outside the package in ``driver.py``.
+This module contains only the circuit-building operations used by:class:`VQC`.  
+Application logic remains outside the package in ``driver.py``.
 """
 
 from __future__ import annotations
@@ -58,36 +58,20 @@ def apply_rotation(name: str, angle: torch.Tensor, wire: int) -> None:
         raise ValueError(f"Unsupported rotation gate: {name}")
 
 
-def encode_inputs(
-    inputs: torch.Tensor,
-    n_qubits: int,
-    encoding_gate: str,
-) -> None:
+def encode_inputs(inputs: torch.Tensor, n_qubits: int, encoding_gate: str) -> None:
     """Encode one classical feature onto each qubit."""
     for wire in range(n_qubits):
         apply_rotation(encoding_gate, inputs[wire], wire)
 
 
-def apply_variational_layer(
-    layer_weights: torch.Tensor,
-    n_qubits: int,
-    trainable_rotations: Sequence[str],
-) -> None:
+def apply_variational_layer(layer_weights: torch.Tensor, n_qubits: int, trainable_rotations: Sequence[str]) -> None:
     """Apply the trainable single-qubit rotations of one VQC layer."""
     for wire in range(n_qubits):
         for gate_index, gate_name in enumerate(trainable_rotations):
-            apply_rotation(
-                gate_name,
-                layer_weights[wire, gate_index],
-                wire,
-            )
+            apply_rotation(gate_name, layer_weights[wire, gate_index], wire)
 
 
-def apply_entanglement(
-    n_qubits: int,
-    entanglement: str,
-    entangling_gate: str,
-) -> None:
+def apply_entanglement(n_qubits: int, entanglement: str, entangling_gate: str) -> None:
     """Entangle qubits using the configured topology and two-qubit gate."""
     if entanglement == "none" or n_qubits == 1:
         return

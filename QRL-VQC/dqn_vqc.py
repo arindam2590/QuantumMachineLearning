@@ -6,7 +6,6 @@ This module contains:
 - epsilon-greedy action selection
 - one DQN optimization step
 
-The environment loop, CLI, saving, evaluation, and rendering stay in the driver.
 """
 
 from collections import deque
@@ -35,35 +34,15 @@ class ReplayBuffer:
 
         states, actions, rewards, next_states, dones = zip(*batch)
 
-        states = torch.tensor(
-            states,
-            dtype=torch.long,
-            device=device,
-        )
+        states = torch.tensor(states, dtype=torch.long, device=device)
 
-        actions = torch.tensor(
-            actions,
-            dtype=torch.long,
-            device=device,
-        ).unsqueeze(1)
+        actions = torch.tensor(actions, dtype=torch.long, device=device).unsqueeze(1)
 
-        rewards = torch.tensor(
-            rewards,
-            dtype=torch.float32,
-            device=device,
-        )
+        rewards = torch.tensor(rewards, dtype=torch.float32, device=device)
 
-        next_states = torch.tensor(
-            next_states,
-            dtype=torch.long,
-            device=device,
-        )
+        next_states = torch.tensor(next_states, dtype=torch.long, device=device)
 
-        dones = torch.tensor(
-            dones,
-            dtype=torch.float32,
-            device=device,
-        )
+        dones = torch.tensor(dones, dtype=torch.float32, device=device)
 
         return states, actions, rewards, next_states, dones
 
@@ -111,28 +90,16 @@ class VQCDQN(nn.Module):
 
     def state_to_quantum_angles(self, states):
         """Convert integer state IDs to binary angle-encoded VQC inputs."""
-        states = torch.as_tensor(
-            states,
-            dtype=torch.long,
-            device=self.q_head.weight.device,
-        )
+        states = torch.as_tensor(states, dtype=torch.long, device=self.q_head.weight.device)
 
         single_state = states.ndim == 0
         if single_state:
             states = states.unsqueeze(0)
 
         # Most-significant bit first.
-        shifts = torch.arange(
-            self.n_qubits - 1,
-            -1,
-            -1,
-            device=states.device,
-            dtype=torch.long,
-        )
+        shifts = torch.arange(self.n_qubits - 1, -1, -1, device=states.device, dtype=torch.long)
 
-        bits = (
-            (states.unsqueeze(1) >> shifts) & 1
-        ).to(torch.float32)
+        bits = ((states.unsqueeze(1) >> shifts) & 1).to(torch.float32)
 
         angles = torch.pi * bits
 
@@ -143,23 +110,15 @@ class VQCDQN(nn.Module):
 
     def forward(self, states):
         """Return Q-values for one state or a batch of states."""
-        states = torch.as_tensor(
-            states,
-            dtype=torch.long,
-            device=self.q_head.weight.device,
-        )
+        states = torch.as_tensor(states, dtype=torch.long, device=self.q_head.weight.device)
 
         single_state = states.ndim == 0
 
         quantum_inputs = self.state_to_quantum_angles(states)
 
-        quantum_features = self.vqc(
-            quantum_inputs
-        ).to(dtype=torch.float32)
+        quantum_features = self.vqc(quantum_inputs).to(dtype=torch.float32)
 
-        q_values = self.q_head(
-            quantum_features
-        )
+        q_values = self.q_head(quantum_features)
 
         if single_state and q_values.ndim == 2:
             q_values = q_values.squeeze(0)
@@ -167,40 +126,18 @@ class VQCDQN(nn.Module):
         return q_values
 
 
-def select_action(
-    policy_net,
-    state,
-    epsilon,
-    n_actions,
-    rng,
-):
+def select_action(policy_net, state, epsilon, n_actions, rng):
     """Epsilon-greedy DQN action selection."""
     if rng.random() < epsilon:
         return rng.randrange(n_actions)
 
     with torch.no_grad():
-        q_values = policy_net(
-            torch.tensor(
-                state,
-                dtype=torch.long,
-                device=policy_net.q_head.weight.device,
-            )
-        )
+        q_values = policy_net(torch.tensor(state, dtype=torch.long, device=policy_net.q_head.weight.device))
 
-    return int(
-        q_values.argmax().item()
-    )
+    return int(q_values.argmax().item())
 
 
-def optimize_dqn(
-    policy_net,
-    target_net,
-    replay_buffer,
-    optimizer,
-    batch_size,
-    gamma,
-    device,
-):
+def optimize_dqn(policy_net, target_net, replay_buffer, optimizer, batch_size, gamma, device):
     """Perform one DQN minibatch update.
 
     Returns
@@ -212,51 +149,25 @@ def optimize_dqn(
     if len(replay_buffer) < batch_size:
         return None
 
-    (
-        states,
-        actions,
-        rewards,
-        next_states,
-        dones,
-    ) = replay_buffer.sample(
-        batch_size,
-        device,
-    )
+    states, actions, rewards, next_states, dones= replay_buffer.sample(batch_size, device)
 
     # Q(s,a) from the online network.
-    current_q = policy_net(states).gather(
-        1,
-        actions,
-    ).squeeze(1)
+    current_q = policy_net(states).gather(1, actions).squeeze(1)
 
     # Bellman target using the frozen target network.
     with torch.no_grad():
-        next_q = target_net(
-            next_states
-        ).max(dim=1).values
+        next_q = target_net(next_states).max(dim=1).values
 
-        target_q = rewards + (
-            gamma
-            * (1.0 - dones)
-            * next_q
-        )
+        target_q = rewards + (gamma * (1.0 - dones) * next_q)
 
-    loss = F.smooth_l1_loss(
-        current_q,
-        target_q,
-    )
+    loss = F.smooth_l1_loss(current_q, target_q)
 
-    optimizer.zero_grad(
-        set_to_none=True
-    )
+    optimizer.zero_grad(set_to_none=True)
 
     loss.backward()
 
     # Small gradient clipping is helpful for stable DQN updates.
-    torch.nn.utils.clip_grad_norm_(
-        policy_net.parameters(),
-        max_norm=10.0,
-    )
+    torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_norm=10.0)
 
     optimizer.step()
 
