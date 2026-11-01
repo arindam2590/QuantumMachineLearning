@@ -7,33 +7,6 @@
 
 This document explains the complete modular **single-agent Quantum Deep Reinforcement Learning (QDRL)** implementation based on a **Variational Quantum Circuit Deep Q-Network (VQC-DQN)** for the Gymnasium FrozenLake environment, together with the reusable `VQC_framework`.
 
-The documentation is strictly about the **software design and code behavior**.
-
-It explains:
-
-- the project structure;
-- the responsibility of every source file;
-- all classes;
-- all public and internal functions;
-- command-line arguments;
-- configuration parameters;
-- state encoding;
-- VQC construction;
-- replay memory;
-- epsilon-greedy action selection;
-- online and target Q-networks;
-- DQN optimization;
-- device handling;
-- model saving;
-- CSV logging;
-- circuit visualization;
-- plotting utilities;
-- tensor shapes;
-- module interaction;
-- execution sequence;
-- extension points.
-
-This document intentionally does **not** interpret, compare, or discuss experimental results.
 
 ---
 
