@@ -1,0 +1,16 @@
+# Quantum ML Project
+# Supported Python for this environment: 3.11 - 3.14
+# Recommended on Apple Silicon Mac: Python 3.14
+#
+# PyTorch currently has macOS ARM64 wheels through Python 3.14,
+# but not Python 3.15. Create the environment first, for example:
+#
+#   conda create -n qml314 python=3.14 -y
+#   conda activate qml314
+#   python -m pip install --upgrade pip
+#   pip install -r requirements.txt
+
+pennylane==0.45.1
+torch==2.14.1
+PyYAML>=6.0,<7.0
+matplotlib>=3.10,<4.0
