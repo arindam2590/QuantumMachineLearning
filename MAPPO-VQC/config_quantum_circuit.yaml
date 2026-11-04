@@ -9,7 +9,7 @@ quantum_circuit:
   n_qubits: 4
 
   # Number of repeated trainable variational layers.
-  n_layers: 2
+  n_layers: 3
 
   # Classical-data encoding gate: RX | RY | RZ
   encoding_gate: RY
