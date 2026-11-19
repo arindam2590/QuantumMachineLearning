@@ -1,0 +1,74 @@
+{
+  "algo": "maddpg",
+  "algorithm_config": {
+    "gradient_clip_norm": null,
+    "actor_lr": 0.001,
+    "critic_lr": 0.001,
+    "gamma": 0.95,
+    "tau": 0.01,
+    "hidden_layers": [
+      256,
+      256,
+      64
+    ],
+    "optimizer": "Adam",
+    "replay_capacity": 100000,
+    "batch_size": 256,
+    "warmup_steps": 1000,
+    "policy_update_frequency": 1,
+    "exploration_noise_std": 0.2,
+    "exploration_noise_decay": 0.99999,
+    "minimum_exploration_noise": 0.02,
+    "max_training_steps": 1000000,
+    "validation_interval": 10000,
+    "checkpoint_interval": 10000,
+    "seed": 42,
+    "device": "cpu",
+    "evaluation_episodes": 10
+  },
+  "environment_overrides": {
+    "scenario": "urban",
+    "num_drones": 2,
+    "building_density": 0.65,
+    "episode_steps": 1600
+  },
+  "training_seeds": [
+    42
+  ],
+  "validation_seeds": [
+    100042,
+    100043,
+    100044,
+    100045,
+    100046,
+    100047,
+    100048,
+    100049,
+    100050,
+    100051
+  ],
+  "test_seeds": [
+    200000,
+    200001,
+    200002,
+    200003,
+    200004,
+    200005,
+    200006,
+    200007,
+    200008,
+    200009
+  ],
+  "total_steps": 186374,
+  "telemetry_q_interval": 20,
+  "status": "completed independently; no gamma experiments launched",
+  "command": "python train.py --algo maddpg --scenario urban --num-drones 2 --building-density 0.65 --episode-steps 1600 --total-steps 186374 --gamma 0.95 --seed 42 --device cpu --telemetry-q-interval 20",
+  "configuration_usage": "Manifest: apply values through existing CLI; train.py does not load JSON manifests",
+  "training_episode_seed_rule": "42 + episode index; horizon changes actual reset coverage",
+  "baseline_episode_steps": 600,
+  "validation_seed_note": "Historical runner uses training seed + 100000; choosing its actual seed set for paired comparisons rather than unused pilot manifest seeds100000-100009.",
+  "results": "outputs/benchmarks/horizon_1600_gamma_095/REPORT.md",
+  "actual_environment_steps": 186374,
+  "actual_updates": 185375,
+  "run_directory": "outputs/experiments/maddpg/urban/n2/maddpg_urban_n2_seed42_run7617c802fa214b1fa2efe36b6f75df4d"
+}
