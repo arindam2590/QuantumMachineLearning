@@ -14,11 +14,12 @@ import pybullet as p
 
 from .town_sim import TownConfig, TownEnvironment
 from .drone import Drone, DroneConfig
-from .rewards import reward_components
+from .rewards import reward_components, inter_uav_proximity_penalty
+from .boundary_recovery import BoundaryRecovery
 from .observations import observation_size, encode_observation
 
 
-from config.environment_config import EnvConfig
+from .environment_config import EnvConfig
 
 
 class MultiDroneEnv(gym.Env):
@@ -88,6 +89,12 @@ class MultiDroneEnv(gym.Env):
                             radius=self.cfg.drone.radius)
             regions.append(region)
         self.source, self.destination = regions
+        if self.cfg.navigation.stable_hover_enabled:
+            spacing = max(2.5*self.cfg.drone.radius,
+                          self.cfg.navigation.separation_radius if self.cfg.navigation.inter_uav_penalty_enabled else 0.)
+            # Constructive, conservative capacity proof; never change the region.
+            spawn_positions(self.destination, self.cfg.num_drones, spacing,
+                            radius=self.cfg.drone.radius)
         if self.source.overlaps_box(self.destination.center, self.destination.half_size):
             raise ValueError("Source and destination regions must not overlap")
         from .scenes import build_scene
@@ -97,6 +104,12 @@ class MultiDroneEnv(gym.Env):
         self.drones = {}
         self.goals = {}
         self._done = {a: False for a in self.possible_agents}
+        limit = self.town.side/2 + self.cfg.world_margin
+        self._boundary = {a: BoundaryRecovery(
+            [-limit, -limit, self.cfg.drone.min_altitude],
+            [limit, limit, self.cfg.drone.max_altitude], self.cfg.drone, self.cfg.navigation)
+            for a in self.possible_agents}
+        self._goal_dwell = {a: 0 for a in self.possible_agents}
         def is_free(point):
             radius = self.cfg.drone.radius
             for body in self.town.static_body_ids:
@@ -202,7 +215,7 @@ class MultiDroneEnv(gym.Env):
                 raise ValueError(f'{agent} action must be in [-1, 1]')
             controls[agent] = arr
             pos = self.drones[agent].state()[0]
-            previous_dist[agent] = float(np.linalg.norm(self.goals[agent]-pos))
+            previous_dist[agent] = self.destination.distance_to_volume(pos, self.cfg.drone.radius)
         # Integrate drone position/velocity at physics_hz; keep the original
         # MARL control rate, actions, and reward/termination logic.
         n_substeps = self.cfg.physics_hz//self.cfg.control_hz
@@ -211,19 +224,41 @@ class MultiDroneEnv(gym.Env):
         dt = 1. / self.cfg.physics_hz
         from .obstacles import wind_acceleration
         controller_stride = self.cfg.physics_hz//self.cfg.low_level_hz
+        boundary_events = {a: 0 for a in self.agents}
+        boundary_failed = {a: False for a in self.agents}
+        recovery_enabled = self.cfg.scenario == 'urban' and self.cfg.navigation.boundary_recovery_enabled
         for _ in range(n_substeps):
             before = {a: self.drones[a].state() for a in self.agents}
             self.moving_obstacles.update(dt)
             wind = wind_acceleration(self.cfg.disturbances, self.moving_obstacles.elapsed)
             for agent in self.agents:
                 drone = self.drones[agent]
+                recovery = self._boundary[agent]
+                if recovery_enabled:
+                    was_active = recovery.active
+                    event, failed = recovery.update(before[agent][0], before[agent][1],
+                        p.getEulerFromQuaternion(before[agent][4])[2], dt)
+                    if event:
+                        recovery.previous_yaw = self.controllers[agent].yaw_target
+                    boundary_events[agent] += int(event)
+                    boundary_failed[agent] |= failed
+                    if was_active and not recovery.active:
+                        self.controllers[agent].yaw_target = recovery.previous_yaw
                 depleted = drone.battery_model.depleted and self.cfg.battery.terminate_on_depletion
                 if depleted:
                     wrench = (0., np.zeros(3))
                 else:
                     if self._physics_tick % controller_stride == 0:
+                        if self.cfg.navigation.goal_heading_enabled and not (recovery_enabled and recovery.active):
+                            nav = self.cfg.navigation
+                            self.controllers[agent].update_goal_heading(
+                                before[agent][0], self.goals[agent], 1/self.cfg.low_level_hz,
+                                nav.goal_heading_rate, nav.heading_hold_radius)
                         desired = controls[agent]*np.array([self.cfg.drone.max_speed_xy]*2+
                                                           [self.cfg.drone.max_speed_z])
+                        if recovery_enabled and recovery.active:
+                            self.controllers[agent].yaw_target = recovery.yaw
+                            desired = recovery.desired_velocity(before[agent][0])
                         self._wrenches[agent] = self.controllers[agent].compute(
                             drone.physical_state(), desired, 1/self.cfg.low_level_hz)
                     wrench = self._wrenches[agent]
@@ -234,6 +269,17 @@ class MultiDroneEnv(gym.Env):
             for agent in self.agents:
                 drone = self.drones[agent]
                 after = drone.state()
+                if recovery_enabled:
+                    recovery = self._boundary[agent]
+                    was_active = recovery.active
+                    event, failed = recovery.update(after[0], after[1],
+                        p.getEulerFromQuaternion(after[4])[2], 0.)
+                    if event:
+                        recovery.previous_yaw = self.controllers[agent].yaw_target
+                    boundary_events[agent] += int(event)
+                    boundary_failed[agent] |= failed
+                    if was_active and not recovery.active:
+                        self.controllers[agent].yaw_target = recovery.previous_yaw
                 acceleration = (after[1]-before[agent][1])/dt
                 energy_used[agent] += drone.battery_model.update(
                     (before[agent][1]+after[1])/2, acceleration, dt)
@@ -259,16 +305,27 @@ class MultiDroneEnv(gym.Env):
         observations = self._observations()
         rewards, terminated, truncated, infos = {}, {}, {}, {}
         limit = self.town.side/2 + self.cfg.world_margin
+        nav = self.cfg.navigation
+        # Snapshot before any retirement: pair penalties must be symmetric even
+        # when the first agent in iteration finishes on this transition.
+        separation_positions = ({a: self.drones[a].state()[0].copy() for a in self.agents}
+                                if nav.inter_uav_penalty_enabled else {})
         for agent in self.agents:
             pos = self.drones[agent].state()[0]
             distance = float(np.linalg.norm(self.goals[agent]-pos))
+            volume_distance = self.destination.distance_to_volume(pos, self.cfg.drone.radius)
             out_of_bounds = bool(abs(pos[0])>limit or abs(pos[1])>limit or
                                  pos[2]<self.cfg.drone.min_altitude or pos[2]>self.cfg.drone.max_altitude)
+            terminal_boundary = boundary_failed[agent] if recovery_enabled else out_of_bounds
             reached = self.destination.contains(pos, self.cfg.drone.radius) and not collided[agent] and not out_of_bounds
             done = self._done[agent]
             depleted = self.drones[agent].battery_model.depleted
             reached = reached and not (depleted and self.cfg.battery.terminate_on_depletion)
-            new_terminal = (reached or collided[agent] or out_of_bounds or
+            if nav.stable_hover_enabled:
+                stable = reached and np.linalg.norm(self.drones[agent].state()[1]) <= nav.hover_speed
+                self._goal_dwell[agent] = self._goal_dwell[agent]+1 if stable else 0
+                reached = self._goal_dwell[agent] >= nav.hover_dwell_steps
+            new_terminal = (reached or collided[agent] or terminal_boundary or
                             (depleted and self.cfg.battery.terminate_on_depletion)) and not done
             body = self.drones[agent].body_id
             proximity = 0.
@@ -276,16 +333,32 @@ class MultiDroneEnv(gym.Env):
                 other_body = p.getBodyUniqueId(other, physicsClientId=self.client)
                 if other_body == body:
                     continue
+                if nav.inter_uav_penalty_enabled and other_body in {d.body_id for d in self.drones.values()}:
+                    continue  # replaced by the separate center-distance UAV term
                 points = p.getClosestPoints(body, other_body, self.cfg.proximity_distance,
                                              physicsClientId=self.client)
                 if points:
                     proximity = max(proximity, 1-max(0., min(point[8] for point in points))/self.cfg.proximity_distance)
-            components = reward_components(previous_dist[agent], distance,
+            components = reward_components(previous_dist[agent], volume_distance,
                                            float(np.sum(controls[agent]**2)),
                                            new_terminal, reached, self.cfg.rewards,
                                            collision=collided[agent], energy=energy_used[agent],
                                            proximity=proximity, dt=self.cfg.control_dt,
-                                           already_arrived=agent in self.arrival_times)
+                                           already_arrived=agent in self.arrival_times,
+                                           already_terminated=done, goal_radius=self.cfg.goal_radius)
+            if nav.inter_uav_penalty_enabled:
+                distances = [float(np.linalg.norm(separation_positions[agent]-position))
+                             for other, position in separation_positions.items() if other != agent]
+                components['proximity_uav'] = inter_uav_proximity_penalty(
+                    distances, nav.separation_radius, nav.separation_weight, self.cfg.control_dt)
+            if recovery_enabled:
+                components['boundary'] = (-self.cfg.navigation.boundary_contact_penalty*boundary_events[agent]
+                                          if not done and not reached else 0.)
+            else:
+                boundary_failure = (new_terminal and terminal_boundary and not reached
+                                    and not collided[agent]
+                                    and not (depleted and self.cfg.battery.terminate_on_depletion))
+                components['boundary'] = -self.cfg.rewards.boundary_exit if boundary_failure and not done else 0.
             rewards[agent] = sum(components.values()) if not done else 0.
             self._done[agent] = done or new_terminal
             if new_terminal and reached:
@@ -295,7 +368,7 @@ class MultiDroneEnv(gym.Env):
                 self.arrival_times[agent] = self.step_count/self.cfg.control_hz
             if new_terminal:
                 self.status[agent] = ('arrived' if reached else 'collision' if collided[agent]
-                                      else 'battery_depleted' if depleted else 'out_of_bounds')
+                                      else 'battery_depleted' if depleted and self.cfg.battery.terminate_on_depletion else 'out_of_bounds')
                 self._retire_drone(agent, reached)
             elif self.step_count >= self.cfg.max_episode_steps:
                 self.status[agent] = 'truncated'
@@ -305,14 +378,27 @@ class MultiDroneEnv(gym.Env):
             truncated[agent] = self.step_count >= self.cfg.max_episode_steps and not self._done[agent]
             infos[agent] = dict(battery=self.drones[agent].battery, battery_depleted=depleted,
                                 energy_consumed=energy_used[agent],
-                                total_energy_consumed=self.drones[agent].battery_model.consumed, sensors=self.get_sensor_readings(agent), reward_components=components, goal=self.goals[agent].copy(), distance_to_goal=distance,
+                                total_energy_consumed=self.drones[agent].battery_model.consumed,
+                                distance_to_destination_volume=volume_distance,
+                                previous_distance_to_destination_volume=previous_dist[agent], sensors=self.get_sensor_readings(agent), reward_components=components, goal=self.goals[agent].copy(), distance_to_goal=distance,
                                 reached_goal=bool(reached), collision=bool(collided[agent]),
                                 out_of_bounds=out_of_bounds, success=bool(reached))
+            if recovery_enabled:
+                infos[agent].update(boundary_penalty_managed=True,
+                    boundary_contact_count=boundary_events[agent],
+                    boundary_contacts_total=self._boundary[agent].count,
+                    boundary_exit_count=int(new_terminal and terminal_boundary and not collided[agent] and not reached
+                                            and not (depleted and self.cfg.battery.terminate_on_depletion)),
+                    boundary_recovery_active=self._boundary[agent].active)
         self.episode_statistics = dict(steps=self.step_count, duration=self.step_count*self.cfg.control_dt,
             arrivals=len(self.arrival_times),
             failures=sum(s not in ('active', 'arrived', 'truncated') for s in self.status.values()),
             team_success=len(self.arrival_times) == len(self.possible_agents))
         for agent in infos:
+            if nav.stable_hover_enabled:
+                infos[agent]['goal_dwell_steps'] = self._goal_dwell[agent]
+            if nav.goal_heading_enabled:
+                infos[agent]['yaw_reference'] = self.controllers[agent].yaw_target
             infos[agent].update(status=self.status[agent],
                                 cumulative_reward=self.cumulative_rewards[agent],
                                 episode=dict(self.episode_statistics))
@@ -323,6 +409,10 @@ class MultiDroneEnv(gym.Env):
         self.agents = [a for a in self.agents if not (terminated[a] or truncated[a])]
         if terminated['__all__'] or truncated['__all__']:
             self.agents = []  # Return final observations/rewards on the terminal step.
+        if any(terminated[a] or truncated[a] for a in observations):
+            # Keep retiring agents' final observations, but refresh survivors so
+            # neighbour slots exclude peers retired on this same transition.
+            observations.update(self._observations())
         return observations, rewards, terminated, truncated, infos
 
     def _retire_drone(self, agent, arrived):

@@ -8,9 +8,10 @@ agents using centralized training and decentralized execution (CTDE):
   shared policy can learn asymmetric cooperative roles when useful;
 * one classical centralized critic receives the concatenation of all local
   observations during training only;
-* generalized advantage estimation (GAE) computes cooperative advantages;
-* PPO clipping, entropy regularization, clipped value loss, and gradient
-  clipping are used during optimization.
+* generalized advantage estimation (GAE) is computed independently for each
+  complete trajectory before trajectories are combined into a rollout;
+* PPO clipping, scheduled entropy regularization, clipped value loss, and
+  gradient clipping are used during optimization.
 
 ``VQC_framework`` is consumed as-is and is not modified by this module.
 """
@@ -459,6 +460,13 @@ class VQCMAPPOLearner:
             value = self.critic(centralized_observation)
         return float(value.item())
 
+    def set_entropy_coefficient(self, coefficient: float) -> None:
+        """Update the entropy coefficient used by subsequent PPO updates."""
+        coefficient = float(coefficient)
+        if coefficient < 0.0:
+            raise ValueError("entropy coefficient must be non-negative")
+        self.entropy_coefficient = coefficient
+
     def _compute_gae(
         self,
         trajectory: MAPPOEpisodeBuffer,
@@ -509,32 +517,87 @@ class VQCMAPPOLearner:
 
     def update(
         self,
-        trajectory: MAPPOEpisodeBuffer,
+        trajectories: Sequence[MAPPOEpisodeBuffer] | MAPPOEpisodeBuffer,
     ) -> MAPPOUpdateMetrics:
-        """Perform PPO updates from one complete cooperative trajectory."""
-        advantages, returns = self._compute_gae(trajectory)
+        """Perform one PPO/MAPPO update from a multi-episode rollout.
 
-        local_observations = np.asarray(
-            trajectory.local_observations,
-            dtype=np.float32,
-        )  # [T, N, O]
-        centralized_observations = np.asarray(
-            trajectory.centralized_observations,
-            dtype=np.float32,
-        )  # [T, S]
-        actions = np.asarray(trajectory.actions, dtype=np.int64)  # [T, N]
-        old_log_probabilities = np.asarray(
-            trajectory.log_probabilities,
-            dtype=np.float32,
-        )  # [T, N]
-        old_values = np.asarray(trajectory.values, dtype=np.float32)  # [T]
+        GAE is computed independently inside every trajectory so episode
+        boundaries are never crossed. The resulting on-policy samples are then
+        concatenated and shuffled into PPO minibatches. This avoids repeatedly
+        fitting a single short episode and gives successful and unsuccessful
+        trajectories a shared optimization context.
+        """
+        if isinstance(trajectories, MAPPOEpisodeBuffer):
+            rollout = [trajectories]
+        else:
+            rollout = list(trajectories)
+
+        if not rollout:
+            raise ValueError("Cannot update from an empty rollout")
+
+        local_observation_parts: list[np.ndarray] = []
+        centralized_observation_parts: list[np.ndarray] = []
+        action_parts: list[np.ndarray] = []
+        old_log_probability_parts: list[np.ndarray] = []
+        old_value_parts: list[np.ndarray] = []
+        advantage_parts: list[np.ndarray] = []
+        return_parts: list[np.ndarray] = []
+
+        for trajectory in rollout:
+            if len(trajectory) == 0:
+                continue
+
+            advantages, returns = self._compute_gae(trajectory)
+            local_observations = np.asarray(
+                trajectory.local_observations,
+                dtype=np.float32,
+            )
+            centralized_observations = np.asarray(
+                trajectory.centralized_observations,
+                dtype=np.float32,
+            )
+            actions = np.asarray(trajectory.actions, dtype=np.int64)
+            old_log_probabilities = np.asarray(
+                trajectory.log_probabilities,
+                dtype=np.float32,
+            )
+            old_values = np.asarray(trajectory.values, dtype=np.float32)
+
+            if local_observations.shape[1] != self.n_agents:
+                raise ValueError(
+                    "Trajectory agent count does not match learner"
+                )
+
+            local_observation_parts.append(local_observations)
+            centralized_observation_parts.append(centralized_observations)
+            action_parts.append(actions)
+            old_log_probability_parts.append(old_log_probabilities)
+            old_value_parts.append(old_values)
+            advantage_parts.append(advantages)
+            return_parts.append(returns)
+
+        if not advantage_parts:
+            raise ValueError("Rollout contains no transitions")
+
+        local_observations = np.concatenate(
+            local_observation_parts, axis=0
+        )
+        centralized_observations = np.concatenate(
+            centralized_observation_parts, axis=0
+        )
+        actions = np.concatenate(action_parts, axis=0)
+        old_log_probabilities = np.concatenate(
+            old_log_probability_parts, axis=0
+        )
+        old_values = np.concatenate(old_value_parts, axis=0)
+        advantages = np.concatenate(advantage_parts, axis=0)
+        returns = np.concatenate(return_parts, axis=0)
 
         time_steps, n_agents, observation_dim = local_observations.shape
-        if n_agents != self.n_agents:
-            raise ValueError("Trajectory agent count does not match learner")
 
-        # Each agent-action pair uses the same team-level advantage at that
-        # time step because the environment provides a cooperative objective.
+        # Every agent-action pair shares the cooperative team advantage from
+        # its time step. Normalize over the full multi-episode rollout rather
+        # than independently inside each short episode.
         actor_observations = local_observations.reshape(
             time_steps * n_agents,
             observation_dim,
@@ -546,8 +609,6 @@ class VQCMAPPOLearner:
         actor_actions = actions.reshape(-1)
         actor_old_log_probabilities = old_log_probabilities.reshape(-1)
         actor_advantages = np.repeat(advantages, n_agents)
-
-        # Advantage normalization is a standard PPO stabilization step.
         actor_advantages = (
             actor_advantages - actor_advantages.mean()
         ) / (actor_advantages.std() + 1e-8)

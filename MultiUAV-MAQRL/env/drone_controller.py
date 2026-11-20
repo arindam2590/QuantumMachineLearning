@@ -8,6 +8,13 @@ def cross3(a, b):
     return np.array([a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]])
 
 
+def wrapped_yaw_error(target, current):
+    """Shortest signed world yaw error in [-pi,pi]."""
+    if not np.isfinite(target) or not np.isfinite(current):
+        raise ValueError('Yaw angles must be finite')
+    return float(np.arctan2(np.sin(target-current), np.cos(target-current)))
+
+
 def body_rotation_error(quaternion, target):
     """Shortest rotation from current to target, expressed in current body axes.
 
@@ -100,11 +107,42 @@ class VelocityController:
         self.integral_error = np.zeros(3)
         self.previous_velocity = None
         self.desired_acceleration = np.zeros(3)
+        self._initial_yaw_target = self.yaw_target
+        self._goal_heading_hold = False
+        self._goal_heading_used = False
 
     def reset(self):
         self.integral_error = np.zeros(3)
         self.previous_velocity = None
         self.desired_acceleration[:] = 0.
+        if self._goal_heading_used:
+            self.yaw_target = self._initial_yaw_target
+        self._goal_heading_hold = False
+        self._goal_heading_used = False
+
+    def update_goal_heading(self, position, goal, dt, max_rate, hold_radius):
+        """Slew only the yaw reference; never alter the 3D velocity command.
+
+        Hysteresis holds the last reference within hold_radius horizontally and
+        releases beyond 1.5*hold_radius. Existing quaternion feedback/rate/torque
+        bounds perform stabilization; no Euler-angle integration of the plant.
+        """
+        position, goal = np.asarray(position, dtype=float), np.asarray(goal, dtype=float)
+        if (position.shape != (3,) or goal.shape != (3,) or not np.isfinite(position).all()
+                or not np.isfinite(goal).all() or not all(np.isfinite(x) and x > 0 for x in (dt,max_rate,hold_radius))):
+            raise ValueError('Require finite positions and positive heading limits')
+        delta = goal[:2]-position[:2]
+        self._goal_heading_used = True
+        distance = np.linalg.norm(delta)
+        if distance <= hold_radius:
+            self._goal_heading_hold = True
+        elif distance > 1.5*hold_radius:
+            self._goal_heading_hold = False
+        if not self._goal_heading_hold:
+            target = float(np.arctan2(delta[1], delta[0]))
+            change = np.clip(wrapped_yaw_error(target, self.yaw_target), -max_rate*dt, max_rate*dt)
+            self.yaw_target = wrapped_yaw_error(self.yaw_target+change, 0.)
+        return self.yaw_target
 
     def compute(self, physical_state, desired_velocity, dt):
         c = self.config

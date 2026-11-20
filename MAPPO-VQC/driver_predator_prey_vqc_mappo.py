@@ -15,8 +15,9 @@ Learning design
 The two homogeneous predators use one parameter-shared VQC actor for
 decentralized action selection. During training, a centralized classical
 critic receives the concatenation of both local observations. Generalized
-advantage estimation and PPO clipping are used to update the shared actor
-and centralized critic after every completed episode.
+advantage estimation is computed separately per trajectory, while PPO updates
+are performed from a combined multi-episode rollout rather than after every
+single episode.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from multi_agent_vqc_mappo import (
 from plot_multi_agent_results import plot_multi_agent_results
 from util import (
     configure_runtime_warnings,
+    entropy_coefficient_for_episode,
     load_quantum_circuit_config,
     parse_args,
     resolve_training_device,
@@ -295,7 +297,9 @@ def save_mappo_checkpoint(
             "clip_epsilon": args.clip_epsilon,
             "ppo_epochs": args.ppo_epochs,
             "batch_size": args.batch_size,
-            "entropy_coefficient": args.entropy_coef,
+            "entropy_coefficient_initial": args.entropy_coef,
+            "entropy_coefficient_final": args.entropy_coef_final,
+            "rollout_episodes": args.rollout_episodes,
             "value_loss_coefficient": args.value_loss_coef,
             "max_gradient_norm": args.max_grad_norm,
             "actor_hidden_dim": args.actor_hidden_dim,
@@ -345,12 +349,17 @@ def train_multi_agent_policy(
     learner: VQCMAPPOLearner,
     args,
 ) -> tuple[list[dict], list[np.ndarray]]:
-    """Train the parameter-shared VQC-MAPPO policy."""
+    """Train VQC-MAPPO from combined multi-episode on-policy rollouts."""
     history: list[dict] = []
     sample_observations = reset_multi_agent_environment(
         environment,
         seed=args.seed,
     )
+
+    pending_trajectories: list[MAPPOEpisodeBuffer] = []
+    pending_records: list[dict] = []
+    last_update_metrics = None
+    rollout_update_index = 0
 
     print("\nTraining")
     print("--------")
@@ -394,8 +403,8 @@ def train_multi_agent_policy(
                 joint_actions,
             )
 
-            # ma-gym PredatorPrey uses a cooperative reward signal. Taking the
-            # mean avoids double-counting the same team reward across agents.
+            # PredatorPrey provides a shared cooperative reward to each
+            # predator. Mean reward avoids counting that same signal twice.
             team_step_reward = float(np.mean(rewards))
             joint_done = bool(all(dones))
 
@@ -427,11 +436,13 @@ def train_multi_agent_policy(
             ),
             final_done=final_done,
         )
-        update_metrics = learner.update(trajectory)
 
         captured = prey_captured_from_info(final_info)
         team_episode_reward = float(episode_agent_rewards.mean())
 
+        # Metrics are filled after the rollout containing this episode has
+        # completed its PPO optimization. Repeating rollout-level metrics on
+        # its member episodes keeps the CSV episode-aligned for plotting.
         record = {
             "episode": episode,
             "team_reward": team_episode_reward,
@@ -440,27 +451,85 @@ def train_multi_agent_policy(
             "prey_captured": captured,
             "predator_1_reward": float(episode_agent_rewards[0]),
             "predator_2_reward": float(episode_agent_rewards[1]),
-            "actor_loss": update_metrics.actor_loss,
-            "critic_loss": update_metrics.critic_loss,
-            "entropy": update_metrics.entropy,
-            "approximate_kl": update_metrics.approximate_kl,
-            "clip_fraction": update_metrics.clip_fraction,
+            "rollout_update": 0,
+            "entropy_coefficient": float("nan"),
+            "actor_loss": float("nan"),
+            "critic_loss": float("nan"),
+            "entropy": float("nan"),
+            "approximate_kl": float("nan"),
+            "clip_fraction": float("nan"),
         }
         history.append(record)
+        pending_records.append(record)
+        pending_trajectories.append(trajectory)
+
+        rollout_ready = (
+            len(pending_trajectories) >= args.rollout_episodes
+            or episode == args.episodes
+        )
+
+        if rollout_ready:
+            current_entropy_coefficient = entropy_coefficient_for_episode(
+                initial_coefficient=args.entropy_coef,
+                final_coefficient=args.entropy_coef_final,
+                episode=episode,
+                total_episodes=args.episodes,
+            )
+            learner.set_entropy_coefficient(
+                current_entropy_coefficient
+            )
+            last_update_metrics = learner.update(
+                pending_trajectories
+            )
+            rollout_update_index += 1
+
+            for pending_record in pending_records:
+                pending_record["rollout_update"] = rollout_update_index
+                pending_record["entropy_coefficient"] = (
+                    current_entropy_coefficient
+                )
+                pending_record["actor_loss"] = (
+                    last_update_metrics.actor_loss
+                )
+                pending_record["critic_loss"] = (
+                    last_update_metrics.critic_loss
+                )
+                pending_record["entropy"] = last_update_metrics.entropy
+                pending_record["approximate_kl"] = (
+                    last_update_metrics.approximate_kl
+                )
+                pending_record["clip_fraction"] = (
+                    last_update_metrics.clip_fraction
+                )
+
+            pending_trajectories.clear()
+            pending_records.clear()
 
         if episode == 1 or episode % 25 == 0 or episode == args.episodes:
             recent_window = history[-25:]
             capture_count_25 = sum(
                 int(item["prey_captured"]) for item in recent_window
             )
+
+            if last_update_metrics is None:
+                update_text = (
+                    "update=000 | actor_loss=n/a | critic_loss=n/a | "
+                    "entropy=n/a"
+                )
+            else:
+                update_text = (
+                    f"update={rollout_update_index:03d} | "
+                    f"actor_loss={last_update_metrics.actor_loss:.5f} | "
+                    f"critic_loss={last_update_metrics.critic_loss:.5f} | "
+                    f"entropy={last_update_metrics.entropy:.4f}"
+                )
+
             print(
                 f"Episode {episode:04d}/{args.episodes} | "
                 f"team_reward={team_episode_reward:.3f} | "
                 f"capture25={capture_count_25:02d}/{len(recent_window):02d} | "
                 f"steps={steps_taken:03d} | "
-                f"actor_loss={update_metrics.actor_loss:.5f} | "
-                f"critic_loss={update_metrics.critic_loss:.5f} | "
-                f"entropy={update_metrics.entropy:.4f}"
+                f"{update_text}"
             )
 
     return history, sample_observations
@@ -602,7 +671,11 @@ def main() -> None:
     print(f"PPO clip             : {args.clip_epsilon}")
     print(f"PPO epochs           : {args.ppo_epochs}")
     print(f"Batch size           : {args.batch_size}")
-    print(f"Entropy coefficient  : {args.entropy_coef}")
+    print(f"Rollout episodes     : {args.rollout_episodes}")
+    print(
+        f"Entropy coefficient  : {args.entropy_coef} -> "
+        f"{args.entropy_coef_final}"
+    )
     print(f"Actor hidden dim     : {args.actor_hidden_dim}")
     print(f"Critic hidden dim    : {args.critic_hidden_dim}")
     print(f"Requested device     : {args.device}")

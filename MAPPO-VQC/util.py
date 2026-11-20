@@ -73,7 +73,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clip-epsilon", type=float, default=0.20)
     parser.add_argument("--ppo-epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--entropy-coef", type=float, default=0.02)
+    parser.add_argument(
+        "--rollout-episodes",
+        type=int,
+        default=10,
+        help=(
+            "Number of complete episodes collected before each MAPPO "
+            "optimization update."
+        ),
+    )
+    parser.add_argument(
+        "--entropy-coef",
+        type=float,
+        default=0.02,
+        help="Initial entropy coefficient.",
+    )
+    parser.add_argument(
+        "--entropy-coef-final",
+        type=float,
+        default=0.005,
+        help="Final entropy coefficient reached by linear decay.",
+    )
     parser.add_argument("--value-loss-coef", type=float, default=0.50)
     parser.add_argument("--max-grad-norm", type=float, default=0.50)
     parser.add_argument("--actor-hidden-dim", type=int, default=128)
@@ -119,8 +139,17 @@ def parse_args() -> argparse.Namespace:
         parser.error("--ppo-epochs must be greater than zero")
     if args.batch_size <= 0:
         parser.error("--batch-size must be greater than zero")
+    if args.rollout_episodes <= 0:
+        parser.error("--rollout-episodes must be greater than zero")
     if args.entropy_coef < 0:
         parser.error("--entropy-coef must be non-negative")
+    if args.entropy_coef_final < 0:
+        parser.error("--entropy-coef-final must be non-negative")
+    if args.entropy_coef_final > args.entropy_coef:
+        parser.error(
+            "--entropy-coef-final must not exceed --entropy-coef "
+            "for the default decay schedule"
+        )
     if args.value_loss_coef < 0:
         parser.error("--value-loss-coef must be non-negative")
     if args.max_grad_norm <= 0:
@@ -135,6 +164,24 @@ def parse_args() -> argparse.Namespace:
         parser.error("--eval-episodes must be greater than zero")
 
     return args
+
+
+def entropy_coefficient_for_episode(
+    initial_coefficient: float,
+    final_coefficient: float,
+    episode: int,
+    total_episodes: int,
+) -> float:
+    """Linearly decay entropy regularization over training episodes."""
+    if total_episodes <= 1:
+        return float(final_coefficient)
+
+    progress = (episode - 1) / (total_episodes - 1)
+    progress = min(max(progress, 0.0), 1.0)
+    return float(
+        initial_coefficient
+        + progress * (final_coefficient - initial_coefficient)
+    )
 
 
 def resolve_training_device(requested: str) -> str:

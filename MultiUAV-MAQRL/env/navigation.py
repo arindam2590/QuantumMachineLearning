@@ -21,6 +21,17 @@ class Region:
         """Require the complete spherical collision envelope inside the box."""
         return bool(np.all(np.abs(np.asarray(position)-self.center)+radius <= self.half_size+1e-9))
 
+    def distance_to_volume(self, position, radius=0.):
+        """Euclidean metres to admissible UAV-center volume, matching contains()."""
+        point = np.asarray(position, dtype=float)
+        if point.shape != (3,) or not np.all(np.isfinite(point)) or not np.isfinite(radius) or radius < 0:
+            raise ValueError('Require finite 3D position and nonnegative collision radius')
+        usable = self.half_size-radius
+        if np.any(usable < 0):
+            raise ValueError('Region cannot contain the UAV collision envelope')
+        excess = np.maximum(np.abs(point-self.center)-usable-1e-9, 0.)
+        return float(np.linalg.norm(excess))
+
     def overlaps_box(self, center, half_size):
         return bool(np.all(np.abs(np.asarray(center)-self.center) < self.half_size+half_size))
 

@@ -3,7 +3,7 @@ import numpy as np
 import pybullet as p
 
 
-from config.environment_config import TownConfig
+from .environment_config import TownConfig
 
 
 class TownEnvironment:

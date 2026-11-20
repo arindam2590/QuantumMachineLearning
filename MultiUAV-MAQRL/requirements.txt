@@ -1,4 +1,7 @@
-numpy>=1.24
+# Current Ray/RLlib integration; no legacy DDPG/MADDPG Ray pin.
+ray[rllib]>=2.60,<3
+# Compatible with the existing NumPy 1.26 simulator environment.
+pyarrow>=17,<26
+numpy>=1.26,<2
+torch>=2.0
 pybullet>=3.2.6
-gymnasium>=0.29
-pytest>=7

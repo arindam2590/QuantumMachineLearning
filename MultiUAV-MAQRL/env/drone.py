@@ -9,7 +9,7 @@ import numpy as np
 import pybullet as p
 
 
-from config.environment_config import DroneConfig
+from .environment_config import DroneConfig
 
 
 class Drone:
